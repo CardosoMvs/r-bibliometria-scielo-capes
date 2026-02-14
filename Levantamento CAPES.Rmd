@@ -1,0 +1,313 @@
+---
+title: "Levantamento CAPES: Teses e Dissertações"
+subtitle: "Análise da Base de Teses e Dissertações da CAPES (1987-2022)"
+author: "Marcos Cardoso, cardoso.mvs@gmail.com"
+date: "2026/02/14"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+# Introdução
+
+Este projeto realiza uma mineração de dados na base da **CAPES** para identificar e analisar a produção acadêmica brasileira de interesse.
+
+A rotina inclui coleta automatizada, limpeza de dados textuais e visualização de indicadores bibliométricos.
+
+# ---- 
+
+# 1. Configuração do Ambiente
+
+Carregamento das bibliotecas necessárias para manipulação de dados, processamento de texto e visualização.
+
+```{r setup, message=FALSE, warning=FALSE}
+# Instalação e carregamento de pacotes
+if (!require("pacman")) install.packages("pacman")
+if (!require("stringi")) install.packages("stringi")
+
+pacman::p_load(
+  capesR,          # Dados da CAPES
+  stringr, dplyr, purrr, tidyverse, 
+  writexl, arrow, 
+  ggplot2, ggtext, ggpubr, ggrepel, 
+  tm, wordcloud2
+)
+```
+
+# 2. Parâmetros de Busca e Coleta (ETL)
+
+Definimos aqui o intervalo temporal e as Expressões Regulares (Regex) para filtrar apenas os trabalhos relevantes.
+
+Estratégia de Performance: A base da CAPES é massiva. O script abaixo baixa os dados ano a ano, aplica o filtro de tema imediatamente e descarta o restante da memória RAM.
+
+```{r}
+# 1. Intervalo de Anos (Por enquanto disponível 1987 até 2022)
+# Documentação: https://github.com/hugoavmedeiros/capesR
+
+anos_analise <- c(1987:2022)
+
+# --- 2. DEFINIÇÃO INTELIGENTE DOS TERMOS DE BUSCA ---
+
+# A. Termos Específicos
+# Aqui coloque termos que, por si só, já garantem que o tema é o correto.
+termos_metodo <- c( # Será utilizado também para um segundo arquivo, onde esses termos são citados no resumo (Linha58)
+  "modelo century",
+  "modelagem century",
+  "century model",
+  "simulação century"
+)
+
+# B. Combinação de Termos (O Tema + O Contexto)
+# O R vai combinar todas as palavras do 'tema' com todas do 'contexto'.
+# Ex: Vai criar "carbono.*cerrado", "estoque.*cerrado", "biomassa.*savana", etc.
+
+tema_interesse <- c(
+  "dinâmica do carbono",
+  "estoque de carbono"
+  # "estoques de carbono",
+  # "sequestro de carbono",
+  # "matéria orgânica",
+  # "biomassa"
+)
+
+contexto_estudo <- c(
+  "cerrado",
+  "savana"
+  # "brasil central",
+  # "plantio direto",
+  # "integração lavoura",
+  # "soja",
+  # "pastagem",
+  # "cana",
+  # "safrinha"
+)
+
+# --- C. O CÓDIGO MONTA O REGEX SOZINHO (Não mexa aqui) ---
+
+# 1. Cria combinações (Tema + Contexto) com flexibilidade no meio (.*)
+regex_combinado <- as.vector(outer(tema_interesse, contexto_estudo, paste, sep = ".*"))
+
+# 2. Junta tudo (Modelo + Combinações) em uma única "tripa" de busca
+termos_finais <- c(termos_metodo, regex_combinado)
+regex_tema <- paste(termos_finais, collapse = "|")
+
+# Mostra como ficou para você conferir
+print("--- TERMOS GERADOS AUTOMATICAMENTE ---")
+print(termos_finais)
+print("--------------------------------------")
+
+# --- FUNÇÃO DE COLETA OTIMIZADA ---
+ler_e_filtrar <- function(ano) {
+  message(paste("Processando ano:", ano, "..."))
+  
+  # Baixa ou carrega do cache local
+  dados_brutos <- download_capes_data(ano) 
+  
+  # Lê o arquivo parquet e aplica o filtro imediatamente
+  arquivo <- arrow::read_parquet(dados_brutos[[1]])
+  
+  # Filtra pelo título e normaliza nomes de colunas que mudam com o tempo
+  arquivo_filtrado <- arquivo %>%
+    mutate(titulo_min = tolower(titulo)) %>%
+    filter(stringr::str_detect(titulo_min, regex_tema)) %>%
+    dplyr::select(-titulo_min) # Remove coluna auxiliar
+  
+  # Limpeza de memória (Garbage Collection)
+  rm(arquivo, dados_brutos)
+  gc() 
+  
+  return(arquivo_filtrado)
+}
+
+# Executa o loop e consolida em um único dataframe
+df_bruto <- purrr::map_dfr(anos_analise, ler_e_filtrar)
+
+# Salva backup dos dados brutos filtrados
+arquivo_titulo =  writexl::write_xlsx(df_bruto, "dataset_capes.xlsx")
+
+# --- ETAPA EXTRA: FILTRAGEM ESPECÍFICA PELO RESUMO ---
+
+print("--- Iniciando refinamento pelo RESUMO ---")
+
+# 1. Cria o Regex APENAS com os termos do Metodo (ignora o contexto genérico)
+# Vai procurar por: "modelo century", "century model", etc.
+regex_apenas_modelo <- paste(termos_metodo, collapse = "|")
+
+# 2. Filtra o dataframe bruto
+df_resumo_termos_metodo <- df_bruto %>%
+  filter(!is.na(resumo)) %>% 
+  mutate(resumo_min = tolower(resumo)) %>% 
+  filter(stringr::str_detect(resumo_min, regex_apenas_modelo)) %>% 
+  dplyr::select(-resumo_min)
+
+# Salva backup dos dados que possuem "termos_metodo" no resumo
+arquivo_resumo = writexl::write_xlsx(df_resumo_termos_metodo, "dataset_capes_apenas_termos_metodo_resumo.xlsx")
+
+
+print(paste("Arquivo Salvo com dataset Geral (Título):", arquivo_titulo))
+print(paste("Total no dataset geral (Título):", nrow(df_bruto)))
+print(paste("Arquivo Salvo com Termos do Método (linha58) no Resumo):", arquivo_resumo))
+print(paste("Total refinado (Cita Termos do Método (linha58) no Resumo):", nrow(df_resumo_termos_metodo)))
+```
+
+# 3. Tratamento e Padronização de Dados
+
+Dados textuais (nomes de IES, orientadores, cidades) frequentemente apresentam inconsistências (ex: "UFG" vs "Ufg" vs "Univ. Federal de Goiás"). 
+Esta etapa padroniza essas entradas.
+
+```{r}
+#ESCOLHA ENTRE QUAL ARQUIVO FILTRADO GERAR OS GRÁFICOS (COMENTE UM E DESCOMENTE  O OUTRO)
+
+# ARQUIVO DOS TRABALHOS QUE POSSUEM NO TITULO AS PALAVRAS CHAVES BUSCADAS:
+df_limpo <- df_bruto %>% 
+
+# ARQUIVO DOS TRABALHOS QUE POSSUEM NO RESUMO AS PALAVRAS TERMO_METODO (LINHA 58)
+# df_limpo <- df_resumo_termos_metodo %>% 
+ 
+  
+## --- NÃO ALTERAR ABAIXO ---  
+  mutate(
+    # 1. Padronizar TIPO (Mestrado/Doutorado)
+    # Remove acentos e joga tudo para maiúsculo
+    tipo_norm = stringi::stri_trans_general(str_to_upper(tipo), "Latin-ASCII"),
+    
+    tipo_simples = case_when(
+      str_detect(tipo_norm, "DOUTORADO") ~ "Doutorado",
+      str_detect(tipo_norm, "MESTRADO") ~ "Mestrado",
+      TRUE ~ "Outros"
+    ),
+
+    # 2. Padronizar IES (Instituição)
+    ies_norm = stringi::stri_trans_general(str_to_upper(ies), "Latin-ASCII"),
+
+    # 3. Padronizar UF (Estado)
+    uf_norm = stringi::stri_trans_general(str_to_upper(uf), "Latin-ASCII"),
+
+    # 4. Padronizar ORIENTADOR
+    # Remove títulos acadêmicos comuns para agrupar melhor
+    orientador_norm = stringi::stri_trans_general(str_to_upper(orientacao), "Latin-ASCII"),
+    orientador_norm = str_remove_all(orientador_norm, "PROF. |DR. |DRA. |PHD |DOCENTE |ORIENTADOR "),
+    orientador_norm = str_squish(orientador_norm) # Remove espaços duplos
+  ) %>%
+  filter(!is.na(ano_base))
+
+# Ver todas as opções detalhadas
+# table(df_limpo$tipo_simples, useNA = "always")
+# table(df_limpo$ies_norm, useNA = "always")
+# table(df_limpo$uf_norm, useNA = "always")
+# table(df_limpo$orientador_norm, useNA = "always")
+```
+
+# 4. Análises Bibliométricas
+
+# 4.1. Evolução Temporal da Produção
+
+Acompanhamento do volume de pesquisas ao longo dos anos.
+
+```{r}
+df_evolucao <- df_limpo %>%
+  count(ano_base, tipo_simples)
+
+# Criação de Subtítulo Dinâmico
+total_trabalhos <- sum(df_evolucao$n)
+ano_min <- min(df_evolucao$ano_base, na.rm = TRUE)
+ano_max <- max(df_evolucao$ano_base, na.rm = TRUE)
+subtitulo_dinamico <- paste0("Total: ", total_trabalhos, " trabalhos (Período: ", ano_min, " - ", ano_max, ")")
+
+# Plotagem
+ggplot(df_evolucao, aes(x = ano_base, y = n, fill = tipo_simples)) +
+  geom_col(position = "stack", alpha = 0.9, width = 0.7) +
+  geom_text(aes(label = n), position = position_stack(vjust = 0.5), size = 3, color = "white") +
+  
+  # Adicionei a cor para "Outros" (Cinza)
+  scale_fill_manual(values = c("Doutorado" = "#006d2c", 
+                               "Mestrado" = "#66c2a4", 
+                               "Outros" = "#969696")) + 
+  
+  scale_x_continuous(breaks = pretty(df_evolucao$ano_base)) +
+  labs(
+    title = "Evolução da Produção: Carbono e Modelo Century",
+    subtitle = subtitulo_dinamico,
+    x = "Ano da Defesa",
+    y = "Quantidade de Trabalhos",
+    fill = "Nível",
+    caption = "Fonte: Dados CAPES (Processado via R)"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", size = 14)
+  )
+```
+
+## 4.2. Top Instituições (IES)
+
+Quais universidades lideram as pesquisas neste tema?
+
+```{r}
+# Seleciona as Top 15
+df_top_ies <- df_limpo %>%
+  filter(!is.na(ies_norm)) %>%
+  count(ies_norm, sort = TRUE) %>%
+  head(15)
+
+ggplot(df_top_ies, aes(x = reorder(ies_norm, n), y = n)) +
+  geom_col(fill = "#e6550d", alpha = 0.8) + # Cor Laranja (Terra/Solo)
+  geom_text(aes(label = n), hjust = -0.2, size = 3.5) +
+  coord_flip() + # Inverte para ler os nomes
+  labs(
+    title = "Top 15 Instituições (IES)",
+    subtitle = "Universidades com maior produção no tema",
+    x = NULL,
+    y = "Total de Trabalhos"
+  ) +
+  theme_bw()
+```
+## 4.3. Distribuição Geográfica (UF)
+Onde as pesquisas estão concentradas regionalmente?
+
+```{r}
+df_uf <- df_limpo %>%
+  filter(!is.na(uf_norm)) %>%
+  count(uf_norm, sort = TRUE)
+
+ggplot(df_uf, aes(x = reorder(uf_norm, n), y = n)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+  geom_text(aes(label = n), vjust = -0.5, size = 3) +
+  labs(
+    title = "Produção Científica por Estado (UF)",
+    subtitle = "Concentração geográfica dos estudos",
+    x = "Estado",
+    y = "Quantidade"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
+```
+## 4.4. Principais Orientadores
+Pesquisadores com mais orientações concluídas sobre o tema.
+
+```{r}
+# Top 15 Orientadores
+df_orientadores <- df_limpo %>%
+  filter(!is.na(orientador_norm) & orientador_norm != "") %>% # Remove vazios
+  count(orientador_norm, sort = TRUE) %>%
+  head(15)
+
+ggplot(df_orientadores, aes(x = reorder(orientador_norm, n), y = n)) +
+  geom_col(fill = "purple4", alpha = 0.8) +
+  geom_text(aes(label = n), hjust = -0.2, size = 3.5) +
+  coord_flip() +
+  labs(
+    title = "Top 15 Orientadores",
+    subtitle = "Pesquisadores líderes no tema filtrado",
+    x = NULL,
+    y = "Orientações Concluídas"
+  ) +
+  theme_bw()
+```
+

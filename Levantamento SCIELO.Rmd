@@ -1,0 +1,281 @@
+---
+title: "Levantamento Scielo: Artigos"
+subtitle: "Análise da Base de Artigos da Scielo"
+author: "Marcos Cardoso, cardoso.mvs@gmail.com"
+date: "2026/02/14"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+# 1. Introdução e Configuração
+
+Este documento apresenta uma rotina automatizada para coleta, filtragem e análise de publicações acadêmicas indexadas na base **Scielo**. O objetivo é identificar tendências temporais e temáticas de interesse.
+
+Abaixo, carregamos as bibliotecas necessárias.
+
+```{r setup, message=FALSE, warning=FALSE}
+# Instalação e carregamento de pacotes
+if (!require("pacman")) install.packages("pacman")
+
+pacman::p_load(
+  easyScieloPack,  # Coleta de dados SCIELO
+  stringr, dplyr, purrr, tidyverse, 
+  writexl, arrow,  
+  ggplot2, ggtext, ggpubr, ggrepel,
+  tm, wordcloud2) 
+```
+
+# 2. Parâmetros da Pesquisa
+
+Definição das variáveis de controle para fácil manutenção do script.
+
+```{r parametros}
+# --- 2. PARÂMETROS OTIMIZADOS (CORREÇÃO DE ERRO) ---
+
+# 1. Limite (Precisamos de volume para filtrar depois)
+max_registros <- 1000
+
+# 2. Busca na API (SIMPLIFICADA)
+# O segredo: Não use AND/OR complexos aqui. Use o termo principal em inglês.
+# O Scielo indexa artigos em português com palavras-chave em inglês também.
+termo_busca_api <- "soil carbon" 
+
+# --- 3. FILTROS INTELIGENTES (A "Peneira" no R) ---
+
+# A. Termos "Bala de Prata" (Se tiver isso, passa direto)
+termos_metodo <- c(
+  "century model", "century"
+)
+
+# B. Tema (O quê?)
+tema_interesse <- c(
+  "dynamic",  "stock", "carbon",    "organic matter",  "simulation"
+  # "dinâmica", "estoque", "carbono", "matéria orgânica", "simulação",
+
+)
+
+# C. Contexto (Onde?)
+contexto_estudo <- c(
+  "cerrado", "savanna", "savana" 
+  # "plantio direto", "no-tillage", 
+  # "soja", "soybean", 
+  # "pastagem", "pasture"
+  # "brasil", "brazil" 
+)
+
+# --- D. GERAÇÃO DO REGEX BIDIRECIONAL
+
+# 1. Combinação IDA: "Carbono ... Cerrado"
+regex_ida <- as.vector(outer(tema_interesse, contexto_estudo, paste, sep = ".*"))
+
+# 2. Combinação VOLTA: "Cerrado ... Carbono" (Isso resolve seus descartes!)
+regex_volta <- as.vector(outer(contexto_estudo, tema_interesse, paste, sep = ".*"))
+
+# 3. Junta tudo
+termos_finais <- c(termos_metodo, regex_ida, regex_volta)
+regex_filtro_titulo <- paste(termos_finais, collapse = "|")
+
+print(paste("Termo API:", termo_busca_api))
+print(paste("Variações de Filtro Geradas:", length(termos_finais)))
+
+```
+
+# 3. Coleta e Tratamento (ETL)
+
+Realiza a consulta ao pacote, aplica os filtros de texto e exporta os resultados para Excel.
+
+```{r coleta_tratamento}
+print("Iniciando busca na Scielo...")
+
+# 0. PREPARAÇÃO DO REGEX ESPECÍFICO PARA O RESUMO
+# Pega apenas a lista 'termos_metodo' definida anteriormente
+regex_apenas_metodo <- paste(termos_metodo, collapse = "|")
+
+print(paste("Filtro do Título (Completo):", regex_filtro_titulo))
+print(paste("Filtro do Resumo (Só metodos):", regex_apenas_metodo))
+
+# 1. Busca na API
+base_scielo <- search_scielo(
+  termo_busca_api, 
+  n_max = max_registros
+)
+
+# 2. Processamento
+base_scielo_proc <- base_scielo %>% 
+  mutate(
+    titulo_min = tolower(title),
+    resumo_min = tolower(ifelse(is.na(abstract), "", abstract)),
+    
+    # VERIFICAÇÃO DIFERENCIADA:
+    
+    # A. No Título: Usa o filtro COMPLETO (Tema + Contexto + metodo)
+    tem_no_titulo = stringr::str_detect(titulo_min, regex_filtro_titulo),
+    
+    # B. No Resumo: Usa APENAS o filtro de metodoS (Century, RothC, Simulação)
+    tem_no_resumo_metodo = stringr::str_detect(resumo_min, regex_apenas_metodo)
+  )
+
+# --- 3. Separação dos Grupos ---
+
+# GRUPO 1: Match no TÍTULO (Critério Amplo)
+# Se o título diz "Carbono no Cerrado", entra aqui.
+df_match_titulo <- base_scielo_proc %>% 
+  filter(tem_no_titulo == TRUE) %>% 
+  arrange(desc(year)) %>% 
+  dplyr::select(-titulo_min, -resumo_min) 
+
+# GRUPO 2: Match no RESUMO (Critério Restrito - Apenas metodos)
+# Entra aqui se: NÃO passou no título MAS citou "Century/metodo" no resumo.
+df_match_resumo <- base_scielo_proc %>% 
+  filter(tem_no_titulo == FALSE & tem_no_resumo_metodo == TRUE) %>% 
+  arrange(desc(year)) %>% 
+  dplyr::select(-titulo_min, -resumo_min)
+
+# GRUPO 3: Descartados
+total_descartados <- nrow(base_scielo_proc) - nrow(df_match_titulo) - nrow(df_match_resumo)
+
+# --- 4. Exportação ---
+arq_titulo <- "scielo_match_TITULO.xlsx"
+arq_resumo <- "scielo_match_RESUMO_metodo.xlsx"
+
+write_xlsx(df_match_titulo, arq_titulo)
+write_xlsx(df_match_resumo, arq_resumo)
+
+# Relatório
+print("--- RELATÓRIO FINAL ---")
+print(paste("Busca API:", nrow(base_scielo)))
+print(paste("1. TÍTULO (Tema Geral):", nrow(df_match_titulo), "->", arq_titulo))
+print(paste("2. RESUMO (Apenas metodos):", nrow(df_match_resumo), "->", arq_resumo))
+print(paste("3. Descartados:", total_descartados))
+```
+
+# 4. Análise Temporal
+
+Visualização da quantidade de artigos publicados por ano que atendem aos critérios no **Título**.
+
+```{r plot_temporal_titulo, fig.width=10, fig.height=6}
+# --- PREPARAÇÃO ---
+# Se quiser juntar Título + Resumo neste gráfico, descomente a linha abaixo:
+# df_analise_temp <- bind_rows(df_match_titulo, df_match_resumo)
+
+df_analise_temp <- df_match_titulo # Por padrão, usamos apenas os matches de Título
+
+# Agregação
+df_agg_ano <- df_analise_temp %>% 
+  group_by(year) %>% 
+  summarise(n_casos = n()) %>% 
+  ungroup()
+
+# --- DADOS PARA O SUBTÍTULO ---
+total_trabalhos <- sum(df_agg_ano$n_casos)
+
+# Tratamento de erro caso não haja dados (evita quebrar o código)
+if(total_trabalhos > 0) {
+  ano_min <- min(as.numeric(df_agg_ano$year), na.rm = TRUE)
+  ano_max <- max(as.numeric(df_agg_ano$year), na.rm = TRUE)
+  subtitulo_auto <- paste0("Total: ", total_trabalhos, " publicações (Período: ", ano_min, " - ", ano_max, ")")
+} else {
+  subtitulo_auto <- "Nenhum dado encontrado para o período"
+  ano_min <- 2000; ano_max <- 2024 # Valores default para não quebrar o eixo
+}
+
+# --- PLOTAGEM ---
+df_agg_ano %>% 
+  ggplot(aes(x = as.numeric(year), y = n_casos)) +
+  geom_line(alpha = 0.3, color = "darkgreen") +
+  # Mudei a cor para verde (tema ambiental)
+  geom_point(size = 5, alpha = 0.6, col = 'forestgreen') + 
+  geom_text_repel(aes(label = n_casos), size = 4) +
+  
+  # Escala do Eixo X Inteligente
+  scale_x_continuous(
+    breaks = seq(ano_min, ano_max, by = max(1, round((ano_max - ano_min)/5))) 
+  ) +
+  
+  # Textos Adaptados
+  labs(
+    x = "Ano de Publicação",
+    y = "Volume de Artigos",
+    title = "Evolução Temporal: Carbono e Modelagem (Scielo)",
+    subtitle = subtitulo_auto, 
+    caption = "Fonte: Dados Scielo (Filtro: Título)"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_markdown(size = 18, face = "bold"),
+    plot.subtitle = element_text(size = 14, color = "gray30"),
+    axis.text = element_text(size = 12)
+  )
+```
+# 5. Análise Textual (Nuvem de Palavras)
+
+Abaixo, definimos uma função padronizada para gerar nuvens de palavras e a aplicamos aos dados.
+
+```{r funcao_wordcloud}
+gerar_nuvem_customizada <- function(titulos, cor_fundo = "white", stop_extras = NULL) {
+  
+  # 1. Criação do Corpus
+  corpus <- VCorpus(VectorSource(titulos))
+  
+  # 2. Definição de Stopwords (Gerais + Acadêmicas)
+  minhas_stopwords <- c(stopwords("portuguese"), stopwords("english"), stopwords("spanish"),
+                        "one", "the", "dos", "das", "para", "com", "em", "por", 
+                        "analysis", "study", "estudo", "análise", "sobre", "pela", "pelo",
+                        "evaluation", "avaliação", "use", "uso", "using", "utilizando",
+                        "between", "entre", "different", "diferentes")
+  
+  if(!is.null(stop_extras)) {
+    minhas_stopwords <- c(minhas_stopwords, stop_extras)
+  }
+  
+  # 3. Limpeza
+  corpus <- corpus %>% 
+    tm_map(removeNumbers) %>% 
+    tm_map(removePunctuation) %>% 
+    tm_map(content_transformer(tolower)) %>% 
+    tm_map(removeWords, minhas_stopwords) %>% 
+    tm_map(stripWhitespace) # Remove espaços duplos criados pela remoção
+  
+  # 4. Matriz de Termos
+  tdm <- TermDocumentMatrix(corpus) %>% as.matrix()
+  palavras <- sort(rowSums(tdm), decreasing = TRUE)
+  df_wc <- data.frame(palavra = names(palavras), freq = palavras)
+  
+  # 5. Renderização
+  set.seed(1234) # Garante a reprodutibilidade da imagem
+  wordcloud2(df_wc, 
+             size = 0.6, 
+             color = "random-dark", 
+             backgroundColor = cor_fundo,
+             shape = 'circle')
+}
+```
+
+## 5.1. Temas nos Artigos Aceitos (O que está sendo pesquisado?)
+Pode filtrar as palavras chaves dos títulos para encontrar subtemas
+
+```{r wc_true}
+print("Gerando nuvem para artigos ACEITOS (Subtemas)...")
+
+# Lista de palavras "óbvias" para remover
+# Se não tirarmos isso, a nuvem só vai mostrar "CARBONO" gigante.
+termos_para_remover <- c(
+  "cerrado", "carbono", "carbon", "solo", "solos", "soil", "soils",
+  "organic", "organica", "materia", "matter", 
+  "dinamica", "dynamic", "dynamics", "estoque", "stock", "stocks",
+  "modelo", "model", "modeling", "modelagem", "century"
+)
+
+# Nota: Use 'df_match_titulo$title' se usou o script anterior de separação,
+# ou 'df_true$title' se manteve o nome antigo.
+gerar_nuvem_customizada(df_match_titulo$title, stop_extras = termos_para_remover)
+```
+
+
+
