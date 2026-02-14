@@ -35,3 +35,13 @@ Vá até o bloco **2. Parâmetros da Pesquisa** e edite:
 termo_busca_api <- "artificial intelligence" 
 tema_interesse <- c("neural networks", "machine learning", "deep learning")
 contexto_estudo <- c("health", "medicine", "diagnosis")
+```
+
+### No script Capes:
+Vá até o bloco **2. Parâmetros da Pesquisa** e edite:
+```r
+# O script gera automaticamente: "machine learning.*health", "neural networks.*diagnosis", etc.
+tema_interesse <- c("machine learning", "deep learning")
+contexto_estudo <- c("saúde", "diagnóstico", "hospitalar")
+```
+A lógica utiliza Regex Combinatória. O script cruza automaticamente todos os termos do tema com todos os termos do contexto.
