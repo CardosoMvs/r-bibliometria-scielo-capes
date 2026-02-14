@@ -18,7 +18,7 @@ Conecta-se ao pacote da Scielo para buscar artigos publicados.
 ### 2. Módulo Teses & Dissertações (`Levantamento_CAPES.Rmd`)
 Processa a base de dados abertos da CAPES (1987-2022).
 - **Destaques:**
-  - busca automatizada via pacote `capesR'.
+  - busca automatizada via pacote `capesR`.
   - **Gestão de Memória:** O script baixa e processa os dados ano a ano, limpando a memória RAM (`gc()`) automaticamente, permitindo a análise de milhões de registros em computadores pessoais.
   - Padronização de nomes de Instituições e Orientadores via `stringi`.
   - Análises geográficas e temporais prontas.
